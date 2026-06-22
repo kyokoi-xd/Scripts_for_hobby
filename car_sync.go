@@ -21,13 +21,13 @@ type Settings struct {
 	TargetDir string `json:"target_dir"`
 	Overwrite bool   `json:"overwrite"` // перезаписывать существующие папки Wxx
 	Year      int    `json:"year"`      // год (по умолчанию 2026)
+	Season    string `json:"season"`    // выбор сезона
 }
 
 const (
-	appName        = "wxxsync"
-	settingsFile   = "settings.json"
-	defaultYear    = 2026
-	allowedSeasons = "S2,S3,S4" // можно расширить
+	appName      = "car_sync"
+	settingsFile = "settings.json"
+	defaultYear  = 2026
 )
 
 func getSettingsPath() string {
@@ -36,8 +36,7 @@ func getSettingsPath() string {
 }
 
 func loadSettings() Settings {
-	var s Settings
-	s.Year = defaultYear
+	s := Settings{Year: defaultYear}
 	path := getSettingsPath()
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -99,7 +98,7 @@ func copyDir(src, dst string) error {
 // ---------- Основная логика синхронизации ----------
 // collectSeasonPaths собирает все пути к папкам сезонов (S2/S3/S4) внутри year
 // относительно корня root, но только если родительская папка = year.
-func collectSeasonPaths(root string, year int) ([]string, error) {
+func collectSeasonPaths(root string, year int, season string) ([]string, error) {
 	var seasons []string
 	yearStr := strconv.Itoa(year)
 
@@ -112,11 +111,11 @@ func collectSeasonPaths(root string, year int) ([]string, error) {
 		}
 		name := d.Name()
 		// Проверяем, что имя папки - сезон (S2, S3, S4)
-		if !strings.HasPrefix(name, "S") || len(name) != 2 {
+		if !strings.HasPrefix(name, "S") || len(name) < 2 {
 			return nil
 		}
 		// Проверяем допустимые сезоны
-		if name != "S2" && name != "S3" && name != "S4" {
+		if season != "" && name != season {
 			return nil
 		}
 		// Проверяем, что родительская папка называется yearStr
@@ -136,9 +135,9 @@ func collectSeasonPaths(root string, year int) ([]string, error) {
 }
 
 // syncDirs выполняет синхронизацию
-func syncDirs(sourceRoot, targetRoot string, year int, overwrite bool, logFunc func(string)) error {
+func syncDirs(sourceRoot, targetRoot string, year int, season string, overwrite bool, logFunc func(string)) error {
 	// Собираем все сезонные папки в целевой
-	targetSeasons, err := collectSeasonPaths(targetRoot, year)
+	targetSeasons, err := collectSeasonPaths(targetRoot, year, season)
 	if err != nil {
 		return err
 	}
@@ -196,28 +195,90 @@ func syncDirs(sourceRoot, targetRoot string, year int, overwrite bool, logFunc f
 	return nil
 }
 
+// ---------- Удаление лишних сезонов ----------
+// deleteOtherSeasons удаляет все папки сезонов в targetRoot, кроме keepSeason (если указан),
+// внутри папки year. Возвращает список удалённых путей для отображения в диалоге.
+func deleteOtherSeasons(targetRoot string, year int, keepSeason string, logFunc func(string)) ([]string, error) {
+	yearStr := strconv.Itoa(year)
+	var toDelete []string
+
+	// Сначала соберём все папки сезонов, которые нужно удалить
+	err := filepath.WalkDir(targetRoot, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		name := d.Name()
+		if !strings.HasPrefix(name, "S") || len(name) < 2 {
+			return nil
+		}
+		// Пропускаем, если это сохраняемый сезон
+		if keepSeason != "" && name == keepSeason {
+			return nil
+		}
+		parent := filepath.Base(filepath.Dir(path))
+		if parent != yearStr {
+			return nil
+		}
+		rel, err := filepath.Rel(targetRoot, path)
+		if err != nil {
+			return err
+		}
+		toDelete = append(toDelete, rel)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if len(toDelete) == 0 {
+		logFunc("Нет папок для удаления.")
+		return toDelete, nil
+	}
+
+	// Удаляем
+	for _, rel := range toDelete {
+		fullPath := filepath.Join(targetRoot, rel)
+		logFunc("Удаляем: " + rel)
+		if err := os.RemoveAll(fullPath); err != nil {
+			logFunc("Ошибка удаления " + rel + ": " + err.Error())
+		} else {
+			logFunc("Успешно удалено: " + rel)
+		}
+	}
+	return toDelete, nil
+}
+
 // ---------- GUI ----------
 func main() {
 	a := app.New()
 	w := a.NewWindow("Синхронизация Wxx")
-	w.Resize(fyne.NewSize(900, 700))
+	w.Resize(fyne.NewSize(1000, 750))
 
-	// Загружаем настройки
 	settings := loadSettings()
 
-	// Элементы интерфейса
+	// Поля ввода (расширенные)
 	sourceEntry := widget.NewEntry()
 	sourceEntry.SetText(settings.SourceDir)
+	sourceEntry.Resize(fyne.NewSize(400, 1110))
+
 	targetEntry := widget.NewEntry()
 	targetEntry.SetText(settings.TargetDir)
+	targetEntry.Resize(fyne.NewSize(400, 1110))
+
+	yearEntry := widget.NewEntry()
+	yearEntry.SetText(strconv.Itoa(settings.Year))
+	yearEntry.Resize(fyne.NewSize(100, 1110))
+
+	seasonEntry := widget.NewEntry()
+	seasonEntry.SetText(settings.Season)
+	seasonEntry.Resize(fyne.NewSize(80, 1110))
+	seasonEntry.SetPlaceHolder("S3")
 
 	overwriteCheck := widget.NewCheck("Перезаписывать существующие папки Wxx (удалить и скопировать заново)", func(b bool) {})
 	overwriteCheck.SetChecked(settings.Overwrite)
-
-	yearEntry := widget.NewEntry()
-	yearEntry.SetText(string(rune('0'+settings.Year/1000)) + string(rune('0'+(settings.Year/100)%10)) +
-		string(rune('0'+(settings.Year/10)%10)) + string(rune('0'+settings.Year%10)))
-	// Упростим через fmt, но для краткости оставлю так (лучше использовать strconv.Itoa)
 
 	logText := widget.NewMultiLineEntry()
 	logText.SetMinRowsVisible(15)
@@ -239,30 +300,26 @@ func main() {
 		}, w)
 	})
 
-	// Кнопка запуска
+	// Кнопка запуска синхронизации
 	runBtn := widget.NewButton("Запустить синхронизацию", func() {
-		// Сохраняем настройки
 		settings.SourceDir = sourceEntry.Text
 		settings.TargetDir = targetEntry.Text
 		settings.Overwrite = overwriteCheck.Checked
-		// Парсим год
-		year := defaultYear
-		if y, err := strconv.Atoi(yearEntry.Text); err == nil && y > 2000 {
-			year = y
+		year, _ := strconv.Atoi(yearEntry.Text)
+		if year > 2000 {
+			settings.Year = year
 		}
-		settings.Year = year
+		settings.Season = strings.TrimSpace(seasonEntry.Text)
 		saveSettings(settings)
 
-		// Очищаем лог
 		logText.SetText("")
 		logFunc := func(msg string) {
 			logText.SetText(logText.Text + msg + "\n")
 		}
 
-		// Запускаем синхронизацию в горутине, чтобы не блокировать UI
 		go func() {
 			logFunc("Начинаем синхронизацию...")
-			err := syncDirs(settings.SourceDir, settings.TargetDir, settings.Year, settings.Overwrite, logFunc)
+			err := syncDirs(settings.SourceDir, settings.TargetDir, settings.Year, settings.Season, settings.Overwrite, logFunc)
 			if err != nil {
 				logFunc("Ошибка: " + err.Error())
 			} else {
@@ -271,18 +328,83 @@ func main() {
 		}()
 	})
 
+	// Кнопка удаления лишних сезонов
+	deleteBtn := widget.NewButton("Удалить лишние сезоны (кроме выбранного)", func() {
+		// Сохраняем текущие настройки
+		settings.SourceDir = sourceEntry.Text
+		settings.TargetDir = targetEntry.Text
+		settings.Overwrite = overwriteCheck.Checked
+		year, _ := strconv.Atoi(yearEntry.Text)
+		if year > 2000 {
+			settings.Year = year
+		}
+		settings.Season = strings.TrimSpace(seasonEntry.Text)
+		saveSettings(settings)
+
+		if settings.TargetDir == "" {
+			dialog.ShowInformation("Ошибка", "Целевая директория не выбрана.", w)
+			return
+		}
+
+		// Сначала соберём список того, что будет удалено (для отображения)
+		toDelete, err := deleteOtherSeasons(settings.TargetDir, settings.Year, settings.Season, func(msg string) {})
+		if err != nil {
+			dialog.ShowInformation("Ошибка", "Не удалось собрать список: "+err.Error(), w)
+			return
+		}
+		if len(toDelete) == 0 {
+			dialog.ShowInformation("Информация", "Нет папок для удаления.", w)
+			return
+		}
+
+		// Формируем сообщение подтверждения
+		msg := "Будут удалены следующие папки сезонов (кроме '" + settings.Season + "'):\n\n"
+		for _, rel := range toDelete {
+			msg += "  • " + rel + "\n"
+		}
+		msg += "\nПродолжить?"
+
+		dialog.ShowConfirm("Подтверждение удаления", msg, func(confirm bool) {
+			if !confirm {
+				return
+			}
+			// Выполняем удаление с логированием
+			logText.SetText("")
+			logFunc := func(msg string) {
+				logText.SetText(logText.Text + msg + "\n")
+			}
+			go func() {
+				logFunc("Начинаем удаление лишних сезонов...")
+				_, err := deleteOtherSeasons(settings.TargetDir, settings.Year, settings.Season, logFunc)
+				if err != nil {
+					logFunc("Ошибка: " + err.Error())
+				} else {
+					logFunc("Удаление завершено.")
+				}
+			}()
+		}, w)
+	})
+
 	// Компоновка
 	form := container.NewVBox(
 		widget.NewLabel("Исходная директория (полная, содержит все Wxx):"),
 		container.NewHBox(sourceEntry, chooseSource),
 		widget.NewLabel("Целевая директория (неполная, куда копировать):"),
 		container.NewHBox(targetEntry, chooseTarget),
+
 		container.NewHBox(
 			widget.NewLabel("Год (папка):"),
 			yearEntry,
+			widget.NewLabel("Сезон (например, S3):"),
+			seasonEntry,
 			overwriteCheck,
 		),
-		runBtn,
+
+		container.NewHBox(
+			runBtn,
+			deleteBtn,
+		),
+
 		widget.NewLabel("Лог операций:"),
 		logText,
 	)

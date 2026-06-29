@@ -17,11 +17,12 @@ import (
 
 // ---------- Настройки ----------
 type Settings struct {
-	SourceDir string `json:"source_dir"`
-	TargetDir string `json:"target_dir"`
-	Overwrite bool   `json:"overwrite"` // перезаписывать существующие папки Wxx
-	Year      int    `json:"year"`      // год (по умолчанию 2026)
-	Season    string `json:"season"`    // выбор сезона
+	SourceDir  string   `json:"source_dir"`
+	TargetDir  string   `json:"target_dir"`
+	Overwrite  bool     `json:"overwrite"`  // перезаписывать существующие папки Wxx
+	Year       int      `json:"year"`       // год (по умолчанию 2026)
+	Season     string   `json:"season"`     // выбор сезона
+	Extensions []string `json:"extensions"` // расширение файлов (например, .sto)
 }
 
 const (
@@ -69,9 +70,8 @@ func copyFile(src, dst string) error {
 	return err
 }
 
-// copyDir рекурсивно копирует папку src в dst (dst будет создана)
+// copyDir копирует содержимое src в dst рекурсивно.
 func copyDir(src, dst string) error {
-	// Создаём целевую папку
 	if err := os.MkdirAll(dst, 0755); err != nil {
 		return err
 	}
@@ -134,14 +134,71 @@ func collectSeasonPaths(root string, year int, season string) ([]string, error) 
 	return seasons, err
 }
 
-// syncDirs выполняет синхронизацию
-func syncDirs(sourceRoot, targetRoot string, year int, season string, overwrite bool, logFunc func(string)) error {
+// ---------- Синхронизация с фильтром расширений и прогрессом ----------
+func syncDirs(sourceRoot, targetRoot string, year int, season string, overwrite bool, extensions []string,
+	logFunc func(string), progressCallback func(float64)) error {
 	// Собираем все сезонные папки в целевой
 	targetSeasons, err := collectSeasonPaths(targetRoot, year, season)
 	if err != nil {
 		return err
 	}
-	logFunc("Найдено сезонных папок в целевой: " + string(rune(len(targetSeasons))))
+	logFunc("Найдено сезонных папок в целевой: " + strconv.Itoa(len(targetSeasons)))
+	// Если extensions пуст, копируем все файлы
+	if len(extensions) == 0 {
+		var totalWxx int
+		for _, relSeason := range targetSeasons {
+			sourceSeason := filepath.Join(sourceRoot, relSeason)
+			if _, err := os.Stat(sourceSeason); os.IsNotExist(err) {
+				logFunc("Пропускаем (нет в исходной): " + relSeason)
+				continue
+			}
+			entries, err := os.ReadDir(sourceSeason)
+			if err != nil {
+				logFunc("Ошибка чтения " + sourceSeason + ": " + err.Error())
+				continue
+			}
+			for _, e := range entries {
+				if !e.IsDir() {
+					continue
+				}
+				wName := e.Name()
+				if !strings.HasPrefix(wName, "W") || len(wName) < 3 {
+					continue
+				}
+				srcW := filepath.Join(sourceSeason, wName)
+				dstW := filepath.Join(targetRoot, relSeason, wName)
+				// Проверяем существование целевой папки
+				if _, err := os.Stat(dstW); err == nil {
+					if !overwrite {
+						logFunc("Пропускаем (уже есть): " + filepath.Join(relSeason, wName))
+						continue
+					} else {
+						if err := os.RemoveAll(dstW); err != nil {
+							logFunc("Ошибка удаления " + dstW + ": " + err.Error())
+							continue
+						}
+						logFunc("Удалена старая: " + filepath.Join(relSeason, wName))
+					}
+				}
+				logFunc("Копируем папку: " + filepath.Join(relSeason, wName))
+				if err := copyDir(srcW, dstW); err != nil {
+					logFunc("Ошибка копирования папки " + err.Error())
+				} else {
+					logFunc("Успешно скопировано: " + filepath.Join(relSeason, wName))
+				}
+				totalWxx++
+				progressCallback(float64(totalWxx) / float64(len(targetSeasons)))
+			}
+		}
+		logFunc("Синхронизация завершена. Всего скопировано папок Wxx: " + strconv.Itoa(totalWxx))
+		return nil
+	}
+	type fileJob struct {
+		src string
+		dst string
+	}
+	var jobs []fileJob
+	totalWxx := 0
 
 	for _, relSeason := range targetSeasons {
 		sourceSeason := filepath.Join(sourceRoot, relSeason)
@@ -169,7 +226,7 @@ func syncDirs(sourceRoot, targetRoot string, year int, season string, overwrite 
 			srcW := filepath.Join(sourceSeason, wName)
 			dstW := filepath.Join(targetRoot, relSeason, wName)
 
-			// Проверяем существование в целевой
+			// Проверяем существование целевой папки
 			if _, err := os.Stat(dstW); err == nil {
 				if !overwrite {
 					logFunc("Пропускаем (уже есть): " + filepath.Join(relSeason, wName))
@@ -183,15 +240,69 @@ func syncDirs(sourceRoot, targetRoot string, year int, season string, overwrite 
 					logFunc("Удалена старая: " + filepath.Join(relSeason, wName))
 				}
 			}
+
+			if err := os.MkdirAll(dstW, 0755); err != nil {
+				logFunc("Ошибка создания папки " + dstW + ": " + err.Error())
+				continue
+			}
 			// Копируем папку Wxx
-			logFunc("Копируем: " + filepath.Join(relSeason, wName))
-			if err := copyDir(srcW, dstW); err != nil {
-				logFunc("Ошибка копирования: " + err.Error())
+
+			files, err := os.ReadDir(srcW)
+			if err != nil {
+				logFunc("Ошибка чтения " + srcW + ": " + err.Error())
+				continue
+			}
+			fileCount := 0
+			for _, f := range files {
+				if f.IsDir() {
+					continue
+				}
+				ext := strings.ToLower(filepath.Ext(f.Name()))
+				found := false
+				for _, e := range extensions {
+					if ext == e {
+						found = true
+						break
+					}
+				}
+				if !found {
+					continue
+				}
+				jobs = append(jobs, fileJob{
+					src: filepath.Join(srcW, f.Name()),
+					dst: filepath.Join(dstW, f.Name()),
+				})
+				fileCount++
+			}
+			if fileCount > 0 {
+				logFunc("Подготовлено к копированию " + strconv.Itoa(fileCount) + " файлов из " + filepath.Join(relSeason, wName))
+				totalWxx++
 			} else {
-				logFunc("Успешно скопировано: " + filepath.Join(relSeason, wName))
+				logFunc("Нет файлов для копирования в " + filepath.Join(relSeason, wName))
 			}
 		}
 	}
+
+	if len(jobs) == 0 {
+		logFunc("Нет файлов для копирования.")
+		progressCallback(1.0)
+		return nil
+	}
+
+	logFunc("Всего файлов для копирования: " + strconv.Itoa(len(jobs)))
+
+	// Копируем файлы
+	processed := 0
+	for _, job := range jobs {
+		if err := copyFile(job.src, job.dst); err != nil {
+			logFunc("Ошибка копирования " + job.src + " -> " + job.dst + ": " + err.Error())
+		} else {
+			logFunc("Успешно скопировано " + filepath.Base(job.dst))
+		}
+		processed++
+		progressCallback(float64(processed) / float64(len(jobs)))
+	}
+	logFunc("Синхронизация завершена. Скопировано файлов: " + strconv.Itoa(processed))
 	return nil
 }
 
@@ -255,30 +366,50 @@ func deleteOtherSeasons(targetRoot string, year int, keepSeason string, logFunc 
 func main() {
 	a := app.New()
 	w := a.NewWindow("Синхронизация Wxx")
-	w.Resize(fyne.NewSize(1000, 750))
+	w.Resize(fyne.NewSize(1100, 800))
 
 	settings := loadSettings()
 
 	// Поля ввода (расширенные)
 	sourceEntry := widget.NewEntry()
 	sourceEntry.SetText(settings.SourceDir)
-	sourceEntry.Resize(fyne.NewSize(400, 1110))
+	sourceEntry.Resize(fyne.NewSize(400, 0))
 
 	targetEntry := widget.NewEntry()
 	targetEntry.SetText(settings.TargetDir)
-	targetEntry.Resize(fyne.NewSize(400, 1110))
+	targetEntry.Resize(fyne.NewSize(400, 0))
 
 	yearEntry := widget.NewEntry()
 	yearEntry.SetText(strconv.Itoa(settings.Year))
-	yearEntry.Resize(fyne.NewSize(100, 1110))
+	yearEntry.Resize(fyne.NewSize(100, 0))
 
 	seasonEntry := widget.NewEntry()
 	seasonEntry.SetText(settings.Season)
-	seasonEntry.Resize(fyne.NewSize(80, 1110))
+	seasonEntry.Resize(fyne.NewSize(80, 0))
 	seasonEntry.SetPlaceHolder("S3")
 
 	overwriteCheck := widget.NewCheck("Перезаписывать существующие папки Wxx (удалить и скопировать заново)", func(b bool) {})
 	overwriteCheck.SetChecked(settings.Overwrite)
+
+	// Чекбоксы для расширений
+	extensions := []string{".sto", ".rpy", ".blap", ".olap", ".ibt"}
+	extChecks := make(map[string]*widget.Check)
+	for _, ext := range extensions {
+		check := widget.NewCheck(ext, func(bool) {})
+		for _, savedExt := range settings.Extensions {
+			if savedExt == ext {
+				check.SetChecked(true)
+				break
+			}
+		}
+		extChecks[ext] = check
+	}
+
+	// Progress bar
+	progressBar := widget.NewProgressBar()
+	progressBar.Min = 0
+	progressBar.Max = 1.0
+	progressBar.SetValue(0)
 
 	logText := widget.NewMultiLineEntry()
 	logText.SetMinRowsVisible(15)
@@ -302,6 +433,14 @@ func main() {
 
 	// Кнопка запуска синхронизации
 	runBtn := widget.NewButton("Запустить синхронизацию", func() {
+		// Собираем выбранные расширения
+		var selectedExts []string
+		for ext, check := range extChecks {
+			if check.Checked {
+				selectedExts = append(selectedExts, ext)
+			}
+		}
+		// Сохраняем текущие настройки
 		settings.SourceDir = sourceEntry.Text
 		settings.TargetDir = targetEntry.Text
 		settings.Overwrite = overwriteCheck.Checked
@@ -310,16 +449,29 @@ func main() {
 			settings.Year = year
 		}
 		settings.Season = strings.TrimSpace(seasonEntry.Text)
+		settings.Extensions = selectedExts
 		saveSettings(settings)
 
-		logText.SetText("")
+		fyne.Do(func() {
+			logText.SetText("")
+			progressBar.SetValue(0)
+		})
+
 		logFunc := func(msg string) {
-			logText.SetText(logText.Text + msg + "\n")
+			fyne.Do(func() {
+				logText.SetText(logText.Text + msg + "\n")
+			})
+		}
+		progressFunc := func(percent float64) {
+			fyne.Do(func() {
+				progressBar.SetValue(percent)
+			})
 		}
 
 		go func() {
 			logFunc("Начинаем синхронизацию...")
-			err := syncDirs(settings.SourceDir, settings.TargetDir, settings.Year, settings.Season, settings.Overwrite, logFunc)
+			err := syncDirs(settings.SourceDir, settings.TargetDir, settings.Year, settings.Season,
+				settings.Overwrite, settings.Extensions, logFunc, progressFunc)
 			if err != nil {
 				logFunc("Ошибка: " + err.Error())
 			} else {
@@ -339,6 +491,14 @@ func main() {
 			settings.Year = year
 		}
 		settings.Season = strings.TrimSpace(seasonEntry.Text)
+		// Разбираем выбранные расширения (для сохранения, хотя они не нужны для удаления)
+		var selectedExts []string
+		for ext, check := range extChecks {
+			if check.Checked {
+				selectedExts = append(selectedExts, ext)
+			}
+		}
+		settings.Extensions = selectedExts
 		saveSettings(settings)
 
 		if settings.TargetDir == "" {
@@ -369,9 +529,15 @@ func main() {
 				return
 			}
 			// Выполняем удаление с логированием
-			logText.SetText("")
+			fyne.Do(func() {
+				logText.SetText("")
+				progressBar.SetValue(0)
+			})
+
 			logFunc := func(msg string) {
-				logText.SetText(logText.Text + msg + "\n")
+				fyne.Do(func() {
+					logText.SetText(logText.Text + msg + "\n")
+				})
 			}
 			go func() {
 				logFunc("Начинаем удаление лишних сезонов...")
@@ -381,9 +547,17 @@ func main() {
 				} else {
 					logFunc("Удаление завершено.")
 				}
+				fyne.Do(func() {
+					progressBar.SetValue(1.0)
+				})
 			}()
 		}, w)
 	})
+	// Компоновка чекбоксов расширений
+	extContainer := container.NewHBox()
+	for _, ext := range extensions {
+		extContainer.Add(extChecks[ext])
+	}
 
 	// Компоновка
 	form := container.NewVBox(
@@ -397,14 +571,15 @@ func main() {
 			yearEntry,
 			widget.NewLabel("Сезон (например, S3):"),
 			seasonEntry,
-			overwriteCheck,
 		),
+		container.NewHBox(overwriteCheck),
+		widget.NewLabel("Расширения файлов для копирования (если ничего не выбрано - копируются все):"),
+		extContainer,
 
-		container.NewHBox(
-			runBtn,
-			deleteBtn,
-		),
+		container.NewHBox(runBtn, deleteBtn),
 
+		widget.NewLabel("Прогресс:"),
+		progressBar,
 		widget.NewLabel("Лог операций:"),
 		logText,
 	)

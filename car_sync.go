@@ -193,12 +193,13 @@ func syncDirs(sourceRoot, targetRoot string, year int, season string, overwrite 
 		logFunc("Синхронизация завершена. Всего скопировано папок Wxx: " + strconv.Itoa(totalWxx))
 		return nil
 	}
+	// Режим с фильтром расширений (рекурсивный обход внутри Wxx)
 	type fileJob struct {
 		src string
 		dst string
 	}
 	var jobs []fileJob
-	totalWxx := 0
+	var wxxProcessed int
 
 	for _, relSeason := range targetSeasons {
 		sourceSeason := filepath.Join(sourceRoot, relSeason)
@@ -245,19 +246,17 @@ func syncDirs(sourceRoot, targetRoot string, year int, season string, overwrite 
 				logFunc("Ошибка создания папки " + dstW + ": " + err.Error())
 				continue
 			}
-			// Копируем папку Wxx
-
-			files, err := os.ReadDir(srcW)
-			if err != nil {
-				logFunc("Ошибка чтения " + srcW + ": " + err.Error())
-				continue
-			}
-			fileCount := 0
-			for _, f := range files {
-				if f.IsDir() {
-					continue
+			// Рекурсивно собираем файлы с нужными расширениями
+			var fileCount int
+			err = filepath.WalkDir(srcW, func(path string, d os.DirEntry, err error) error {
+				if err != nil {
+					return err
 				}
-				ext := strings.ToLower(filepath.Ext(f.Name()))
+				if d.IsDir() {
+					return nil
+				}
+				ext := strings.ToLower(filepath.Ext(d.Name()))
+				// Проверяем, что расширение в списке
 				found := false
 				for _, e := range extensions {
 					if ext == e {
@@ -266,25 +265,33 @@ func syncDirs(sourceRoot, targetRoot string, year int, season string, overwrite 
 					}
 				}
 				if !found {
-					continue
+					return nil
 				}
-				jobs = append(jobs, fileJob{
-					src: filepath.Join(srcW, f.Name()),
-					dst: filepath.Join(dstW, f.Name()),
-				})
+				// Вычисляем относительный путь файла относительно srcW
+				rel, err := filepath.Rel(srcW, path)
+				if err != nil {
+					return err
+				}
+				dstFile := filepath.Join(dstW, rel)
+				jobs = append(jobs, fileJob{src: path, dst: dstFile})
 				fileCount++
+				return nil
+			})
+			if err != nil {
+				logFunc("Ошибка обхода папки " + srcW + ": " + err.Error())
+				continue
 			}
 			if fileCount > 0 {
-				logFunc("Подготовлено к копированию " + strconv.Itoa(fileCount) + " файлов из " + filepath.Join(relSeason, wName))
-				totalWxx++
+				logFunc("Найдено " + strconv.Itoa(fileCount) + " файлов в " + filepath.Join(relSeason, wName))
+				wxxProcessed++
 			} else {
-				logFunc("Нет файлов для копирования в " + filepath.Join(relSeason, wName))
+				logFunc("Нет поддерживаемых файлов в " + filepath.Join(relSeason, wName) + " (папка создана)")
 			}
 		}
 	}
 
 	if len(jobs) == 0 {
-		logFunc("Нет файлов для копирования.")
+		logFunc("Нет файлов для копирования (с выбранными расширениями).")
 		progressCallback(1.0)
 		return nil
 	}
@@ -294,6 +301,11 @@ func syncDirs(sourceRoot, targetRoot string, year int, season string, overwrite 
 	// Копируем файлы
 	processed := 0
 	for _, job := range jobs {
+		// Создаём директорию назначения, если её нет
+		if err := os.MkdirAll(filepath.Dir(job.dst), 0755); err != nil {
+			logFunc("Ошибка создания папки " + filepath.Dir(job.dst) + ": " + err.Error())
+			continue
+		}
 		if err := copyFile(job.src, job.dst); err != nil {
 			logFunc("Ошибка копирования " + job.src + " -> " + job.dst + ": " + err.Error())
 		} else {

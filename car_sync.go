@@ -145,7 +145,7 @@ func syncDirs(sourceRoot, targetRoot string, year int, season string, overwrite 
 	logFunc("Найдено сезонных папок в целевой: " + strconv.Itoa(len(targetSeasons)))
 	// Если extensions пуст, копируем все файлы
 	if len(extensions) == 0 {
-		var totalWxx int
+		var totalFolders int
 		for _, relSeason := range targetSeasons {
 			sourceSeason := filepath.Join(sourceRoot, relSeason)
 			if _, err := os.Stat(sourceSeason); os.IsNotExist(err) {
@@ -161,36 +161,38 @@ func syncDirs(sourceRoot, targetRoot string, year int, season string, overwrite 
 				if !e.IsDir() {
 					continue
 				}
-				wName := e.Name()
-				if !strings.HasPrefix(wName, "W") || len(wName) < 3 {
+				folderName := e.Name()
+				isWxx := strings.HasPrefix(folderName, "W") && len(folderName) >= 3
+				isNEC := folderName == "NEC"
+				if !isWxx && !isNEC {
 					continue
 				}
-				srcW := filepath.Join(sourceSeason, wName)
-				dstW := filepath.Join(targetRoot, relSeason, wName)
+				srcFolder := filepath.Join(sourceSeason, folderName)
+				dstFolder := filepath.Join(targetRoot, relSeason, folderName)
 				// Проверяем существование целевой папки
-				if _, err := os.Stat(dstW); err == nil {
+				if _, err := os.Stat(dstFolder); err == nil {
 					if !overwrite {
-						logFunc("Пропускаем (уже есть): " + filepath.Join(relSeason, wName))
+						logFunc("Пропускаем (уже есть): " + filepath.Join(relSeason, folderName))
 						continue
 					} else {
-						if err := os.RemoveAll(dstW); err != nil {
-							logFunc("Ошибка удаления " + dstW + ": " + err.Error())
+						if err := os.RemoveAll(dstFolder); err != nil {
+							logFunc("Ошибка удаления " + dstFolder + ": " + err.Error())
 							continue
 						}
-						logFunc("Удалена старая: " + filepath.Join(relSeason, wName))
+						logFunc("Удалена старая: " + filepath.Join(relSeason, folderName))
 					}
 				}
-				logFunc("Копируем папку: " + filepath.Join(relSeason, wName))
-				if err := copyDir(srcW, dstW); err != nil {
+				logFunc("Копируем папку: " + filepath.Join(relSeason, folderName))
+				if err := copyDir(srcFolder, dstFolder); err != nil {
 					logFunc("Ошибка копирования папки " + err.Error())
 				} else {
-					logFunc("Успешно скопировано: " + filepath.Join(relSeason, wName))
+					logFunc("Успешно скопировано: " + filepath.Join(relSeason, folderName))
 				}
-				totalWxx++
-				progressCallback(float64(totalWxx) / float64(len(targetSeasons)))
+				totalFolders++
+				progressCallback(float64(totalFolders) / float64(len(targetSeasons)))
 			}
 		}
-		logFunc("Синхронизация завершена. Всего скопировано папок Wxx: " + strconv.Itoa(totalWxx))
+		logFunc("Синхронизация завершена. Всего скопировано папок: " + strconv.Itoa(totalFolders))
 		return nil
 	}
 	// Режим с фильтром расширений (рекурсивный обход внутри Wxx)
@@ -199,7 +201,7 @@ func syncDirs(sourceRoot, targetRoot string, year int, season string, overwrite 
 		dst string
 	}
 	var jobs []fileJob
-	var wxxProcessed int
+	var processedFolders int
 
 	for _, relSeason := range targetSeasons {
 		sourceSeason := filepath.Join(sourceRoot, relSeason)
@@ -218,37 +220,38 @@ func syncDirs(sourceRoot, targetRoot string, year int, season string, overwrite 
 			if !e.IsDir() {
 				continue
 			}
-			wName := e.Name()
-			if !strings.HasPrefix(wName, "W") || len(wName) < 3 {
+			folderName := e.Name()
+			isWxx := strings.HasPrefix(folderName, "W") && len(folderName) >= 3
+			isNEC := folderName == "NEC"
+			if !isWxx && !isNEC {
 				continue
 			}
-			// Проверяем, что это действительно Wxx (можно уточнить)
-			// Формируем пути
-			srcW := filepath.Join(sourceSeason, wName)
-			dstW := filepath.Join(targetRoot, relSeason, wName)
+
+			srcFolder := filepath.Join(sourceSeason, folderName)
+			dstFolder := filepath.Join(targetRoot, relSeason, folderName)
 
 			// Проверяем существование целевой папки
-			if _, err := os.Stat(dstW); err == nil {
+			if _, err := os.Stat(dstFolder); err == nil {
 				if !overwrite {
-					logFunc("Пропускаем (уже есть): " + filepath.Join(relSeason, wName))
+					logFunc("Пропускаем (уже есть): " + filepath.Join(relSeason, folderName))
 					continue
 				} else {
 					// Удаляем старую папку
-					if err := os.RemoveAll(dstW); err != nil {
-						logFunc("Ошибка удаления " + dstW + ": " + err.Error())
+					if err := os.RemoveAll(dstFolder); err != nil {
+						logFunc("Ошибка удаления " + dstFolder + ": " + err.Error())
 						continue
 					}
-					logFunc("Удалена старая: " + filepath.Join(relSeason, wName))
+					logFunc("Удалена старая: " + filepath.Join(relSeason, folderName))
 				}
 			}
 
-			if err := os.MkdirAll(dstW, 0755); err != nil {
-				logFunc("Ошибка создания папки " + dstW + ": " + err.Error())
+			if err := os.MkdirAll(dstFolder, 0755); err != nil {
+				logFunc("Ошибка создания папки " + dstFolder + ": " + err.Error())
 				continue
 			}
 			// Рекурсивно собираем файлы с нужными расширениями
 			var fileCount int
-			err = filepath.WalkDir(srcW, func(path string, d os.DirEntry, err error) error {
+			err = filepath.WalkDir(srcFolder, func(path string, d os.DirEntry, err error) error {
 				if err != nil {
 					return err
 				}
@@ -268,24 +271,24 @@ func syncDirs(sourceRoot, targetRoot string, year int, season string, overwrite 
 					return nil
 				}
 				// Вычисляем относительный путь файла относительно srcW
-				rel, err := filepath.Rel(srcW, path)
+				rel, err := filepath.Rel(srcFolder, path)
 				if err != nil {
 					return err
 				}
-				dstFile := filepath.Join(dstW, rel)
+				dstFile := filepath.Join(dstFolder, rel)
 				jobs = append(jobs, fileJob{src: path, dst: dstFile})
 				fileCount++
 				return nil
 			})
 			if err != nil {
-				logFunc("Ошибка обхода папки " + srcW + ": " + err.Error())
+				logFunc("Ошибка обхода папки " + srcFolder + ": " + err.Error())
 				continue
 			}
 			if fileCount > 0 {
-				logFunc("Найдено " + strconv.Itoa(fileCount) + " файлов в " + filepath.Join(relSeason, wName))
-				wxxProcessed++
+				logFunc("Найдено " + strconv.Itoa(fileCount) + " файлов в " + filepath.Join(relSeason, folderName))
+				processedFolders++
 			} else {
-				logFunc("Нет поддерживаемых файлов в " + filepath.Join(relSeason, wName) + " (папка создана)")
+				logFunc("Нет поддерживаемых файлов в " + filepath.Join(relSeason, folderName) + " (папка создана)")
 			}
 		}
 	}

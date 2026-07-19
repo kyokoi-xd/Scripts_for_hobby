@@ -95,6 +95,42 @@ func copyDir(src, dst string) error {
 	return nil
 }
 
+func syncFolder(src, dst string, logFunc func(string)) error {
+	if err := os.MkdirAll(dst, 0755); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		srcPath := filepath.Join(src, e.Name())
+		dstPath := filepath.Join(dst, e.Name())
+		if e.IsDir() {
+			if _, err := os.Stat(dstPath); os.IsNotExist(err) {
+				logFunc("Копируем папку: " + e.Name())
+				if err := copyDir(srcPath, dstPath); err != nil {
+					return err
+				}
+			} else {
+				if err := syncFolder(srcPath, dstPath, logFunc); err != nil {
+					return err
+				}
+			}
+		} else {
+			if _, err := os.Stat(dstPath); os.IsNotExist(err) {
+				logFunc(" Копируем файл: " + e.Name())
+				if err := copyFile(srcPath, dstPath); err != nil {
+					return err
+				}
+			} else {
+				logFunc("Файл уже существует, пропускаем: " + e.Name())
+			}
+		}
+	}
+	return nil
+}
+
 // ---------- Основная логика синхронизации ----------
 // collectSeasonPaths собирает все пути к папкам сезонов (S2/S3/S4) внутри year
 // относительно корня root, но только если родительская папка = year.
@@ -172,7 +208,15 @@ func syncDirs(sourceRoot, targetRoot string, year int, season string, overwrite 
 				// Проверяем существование целевой папки
 				if _, err := os.Stat(dstFolder); err == nil {
 					if !overwrite {
-						logFunc("Пропускаем (уже есть): " + filepath.Join(relSeason, folderName))
+						logFunc("Обновляем папку (дозаполнение): " + filepath.Join(relSeason, folderName))
+						if err := syncFolder(srcFolder, dstFolder, logFunc); err != nil {
+							logFunc("Ошибка синхронизации папки " + err.Error())
+
+						} else {
+							logFunc("Успешно обновлено: " + filepath.Join(relSeason, folderName))
+						}
+						totalFolders++
+						progressCallback(float64(totalFolders) / float64(len(targetSeasons)))
 						continue
 					} else {
 						if err := os.RemoveAll(dstFolder); err != nil {
@@ -192,10 +236,10 @@ func syncDirs(sourceRoot, targetRoot string, year int, season string, overwrite 
 				progressCallback(float64(totalFolders) / float64(len(targetSeasons)))
 			}
 		}
-		logFunc("Синхронизация завершена. Всего скопировано папок: " + strconv.Itoa(totalFolders))
+		logFunc("Синхронизация завершена. Всего обработано папок: " + strconv.Itoa(totalFolders))
 		return nil
 	}
-	// Режим с фильтром расширений (рекурсивный обход внутри Wxx)
+	// Режим с фильтром расширений (рекурсивный обход внутри Wxx/NEC)
 	type fileJob struct {
 		src string
 		dst string
@@ -210,7 +254,7 @@ func syncDirs(sourceRoot, targetRoot string, year int, season string, overwrite 
 			logFunc("Пропускаем (нет в исходной): " + relSeason)
 			continue
 		}
-		// Читаем папки Wxx в исходной
+		// Читаем папки Wxx & NEC в исходной
 		entries, err := os.ReadDir(sourceSeason)
 		if err != nil {
 			logFunc("Ошибка чтения " + sourceSeason + ": " + err.Error())
@@ -231,9 +275,21 @@ func syncDirs(sourceRoot, targetRoot string, year int, season string, overwrite 
 			dstFolder := filepath.Join(targetRoot, relSeason, folderName)
 
 			// Проверяем существование целевой папки
-			if _, err := os.Stat(dstFolder); err == nil {
-				if !overwrite {
-					logFunc("Пропускаем (уже есть): " + filepath.Join(relSeason, folderName))
+			if _, err := os.Stat(dstFolder); err == nil && !overwrite {
+				logFunc("Обновляем (дозаполнение) " + filepath.Join(relSeason, folderName))
+				var localJobs []fileJob
+				var fileCount int
+				err = filepath.WalkDir(srcFolder, func(path string, d os.DirEntry, err error) error {
+					if err != nil {
+						return err
+					}
+					if d.IsDir() {
+						return nil
+					}
+					ext := strings.ToLower(filepath.Ext(d.Name()))
+					found := false
+					
+				})
 					continue
 				} else {
 					// Удаляем старую папку

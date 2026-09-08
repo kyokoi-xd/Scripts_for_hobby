@@ -38,3 +38,5 @@ desktop.ini
 
 # Git
 *.orig
+
+GoogleDrive_Cleaner/credentials.json

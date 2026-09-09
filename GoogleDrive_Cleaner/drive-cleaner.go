@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
@@ -34,8 +35,13 @@ func getTokenFromWeb(config *oauth2.Config) *oauth2.Token {
 	if _, err := fmt.Scan(&authCode); err != nil {
 		log.Fatalf("Не удалось прочитать код: %v", err)
 	}
+	fmt.Printf("Получен код: %s\n", authCode)
 
-	tok, err := config.Exchange(context.Background(), authCode)
+	// Контекст с таймаутом 30 секунд
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	tok, err := config.Exchange(ctx, authCode)
 	if err != nil {
 		log.Fatalf("Не удалось обменять код на токен: %v", err)
 	}

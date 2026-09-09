@@ -40,3 +40,4 @@ desktop.ini
 *.orig
 
 GoogleDrive_Cleaner/credentials.json
+token.json

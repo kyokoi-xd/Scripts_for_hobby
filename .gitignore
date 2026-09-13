@@ -43,3 +43,4 @@ GoogleDrive_Cleaner/credentials.json
 token.json
 GoogleDrive-Downloader/downloads
 GoogleDrive-Downloader/service-account.json
+GoogleDrive-Downloader/download-state.json

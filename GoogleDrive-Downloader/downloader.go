@@ -42,7 +42,8 @@ func shouldDownload(name string) bool {
 
 // ---------- ОБХОД ПАПКИ ----------
 
-func downloadFolder(ctx context.Context, srv *drive.Service, folderID, localPath string) error {
+// collectFolder рекурсивно обходит дерево и наполняет состояние.
+func collectFolder(ctx context.Context, srv *drive.Service, folderID, relPath string, st *DownloadState) error {
 	query := fmt.Sprintf("'%s' in parents and trashed=false", folderID)
 
 	var allFiles []*drive.File
@@ -57,7 +58,7 @@ func downloadFolder(ctx context.Context, srv *drive.Service, folderID, localPath
 		}
 		res, err := call.Do()
 		if err != nil {
-			return fmt.Errorf("не удалось получить список файлов для папки %s: %w", folderID, err)
+			return fmt.Errorf("list folder %s: %w", folderID, err)
 		}
 		allFiles = append(allFiles, res.Files...)
 		if res.NextPageToken == "" {
@@ -66,42 +67,56 @@ func downloadFolder(ctx context.Context, srv *drive.Service, folderID, localPath
 		pageToken = res.NextPageToken
 	}
 
-	if len(allFiles) == 0 {
-		return nil
-	}
-
-	if err := os.MkdirAll(localPath, os.ModePerm); err != nil {
-		return fmt.Errorf("не удалось создать локальную папку %s: %w", localPath, err)
-	}
-
 	for _, file := range allFiles {
-		filePath := filepath.Join(localPath, file.Name)
+		childRel := filepath.Join(relPath, file.Name)
 
 		if file.MimeType == "application/vnd.google-apps.folder" {
-			log.Printf("📁 Вход в папку: %s", filePath)
-			if err := downloadFolder(ctx, srv, file.Id, filePath); err != nil {
+			log.Printf("📁 Обход: %s", childRel)
+			if err := collectFolder(ctx, srv, file.Id, childRel, st); err != nil {
 				return err
 			}
 			continue
 		}
 
-		// Google Docs/Sheets/Slides в нативном формате нельзя скачать через get_media
 		if strings.HasPrefix(file.MimeType, "application/vnd.google-apps.") {
-			log.Printf("⏭️  Пропуск Google-документа: %s (%s)", filePath, file.MimeType)
 			continue
 		}
-
 		if !shouldDownload(file.Name) {
 			continue
 		}
 
-		var expectedSize int64
-		if file.Size != 0 {
-			expectedSize = file.Size
+		st.AddFile(FileState{
+			ID:       file.Id,
+			Name:     file.Name,
+			RelPath:  childRel,
+			Size:     file.Size,
+			MimeType: file.MimeType,
+		})
+	}
+	return nil
+}
+
+// downloadAll проходит по состоянию и качает то, что ещё не скачано.
+func downloadAll(ctx context.Context, srv *drive.Service, st *DownloadState) error {
+	total := len(st.Files)
+	log.Printf("📋 В очереди файлов: %d", total)
+
+	for i, f := range st.Files {
+		filePath := filepath.Join(st.LocalBase, f.RelPath)
+
+		// Ранний выход: если файл уже на диске и размер совпадает — пропускаем.
+		if info, err := os.Stat(filePath); err == nil && f.Size > 0 && info.Size() == f.Size {
+			log.Printf("[%d/%d] ✅ Уже есть: %s", i+1, total, f.RelPath)
+			continue
 		}
 
-		log.Printf("⬇️  Скачивание: %s (ожидаемый размер: %d байт)", filePath, expectedSize)
-		if err := downloadFileWithRetry(ctx, srv, file.Id, filePath, expectedSize); err != nil {
+		// Гарантируем, что родительская директория существует.
+		if err := os.MkdirAll(filepath.Dir(filePath), os.ModePerm); err != nil {
+			return fmt.Errorf("mkdir %s: %w", filepath.Dir(filePath), err)
+		}
+
+		log.Printf("[%d/%d] ⬇️  %s", i+1, total, f.RelPath)
+		if err := downloadFileWithRetry(ctx, srv, f.ID, filePath, f.Size); err != nil {
 			return err
 		}
 	}
@@ -234,28 +249,49 @@ func main() {
 	if err != nil {
 		log.Fatalf("Не удалось прочитать service-account.json: %v", err)
 	}
-
 	config, err := google.JWTConfigFromJSON(b, drive.DriveReadonlyScope)
 	if err != nil {
-		log.Fatalf("Не удалось создать JWT-конфигурацию: %v", err)
+		log.Fatalf("JWT: %v", err)
 	}
-
 	srv, err := drive.NewService(ctx, option.WithHTTPClient(config.Client(ctx)))
 	if err != nil {
-		log.Fatalf("Не удалось создать сервис Drive: %v", err)
+		log.Fatalf("Drive service: %v", err)
 	}
 
 	folderID := "19KnNjl_ac9lsWqG-SYpgHAsflK3JXM7h"
 	localBasePath := "./downloads"
+	statePath := ".download_state.json"
 
-	log.Printf("Начинаю скачивание папки с ID: %s", folderID)
-	log.Printf("Фильтр расширений: %v (пусто = всё)", keys(allowedExtensions))
+	// --- Пытаемся загрузить состояние ---
+	st, err := LoadState(statePath)
+	if err != nil {
+		log.Fatalf("Не удалось загрузить состояние: %v", err)
+	}
 
-	if err := downloadFolder(ctx, srv, folderID, localBasePath); err != nil {
+	if st == nil || st.RootFolderID != folderID {
+		// Состояния нет или оно от другой папки — обходим дерево заново.
+		log.Printf("🔍 Состояние не найдено, обхожу дерево...")
+		st = &DownloadState{
+			RootFolderID: folderID,
+			LocalBase:    localBasePath,
+		}
+		if err := collectFolder(ctx, srv, folderID, "", st); err != nil {
+			log.Fatalf("Ошибка при обходе: %v", err)
+		}
+		if err := st.SaveState(statePath); err != nil {
+			log.Fatalf("Не удалось сохранить состояние: %v", err)
+		}
+		log.Printf("💾 Дерево сохранено в %s (%d файлов)", statePath, len(st.Files))
+	} else {
+		log.Printf("♻️  Загружено состояние: %d файлов", len(st.Files))
+	}
+
+	// --- Скачиваем всё, что не скачано ---
+	if err := downloadAll(ctx, srv, st); err != nil {
 		log.Fatalf("Ошибка при скачивании: %v", err)
 	}
 
-	log.Println("🎉 Скачивание успешно завершено!")
+	log.Println("🎉 Всё скачано!")
 }
 
 func keys(m map[string]bool) []string {

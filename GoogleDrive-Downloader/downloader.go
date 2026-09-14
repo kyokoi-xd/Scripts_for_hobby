@@ -199,7 +199,6 @@ func downloadFileWithRetry(ctx context.Context, srv *drive.Service, fileID, file
 }
 
 // ---------- СКАЧИВАНИЕ ФАЙЛА С ДОКАЧКОЙ ----------
-
 func downloadFile(ctx context.Context, srv *drive.Service, fileID, filePath string, expectedSize int64) error {
 	var localSize int64
 

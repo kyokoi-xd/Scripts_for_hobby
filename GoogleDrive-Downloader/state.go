@@ -79,3 +79,14 @@ func (s *DownloadState) AddFile(f FileState) {
 	s.index[f.ID] = len(s.Files)
 	s.Files = append(s.Files, f)
 }
+
+// HasFile проверяет, есть ли файл в состоянии.
+func (s *DownloadState) HasFile(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.index == nil {
+		s.buildIndex()
+	}
+	_, ok := s.index[id]
+	return ok
+}

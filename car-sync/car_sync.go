@@ -198,7 +198,6 @@ func syncDirs(sourceRoot, targetRoot string, year int, season string, overwrite 
 			logFunc("Создан сезон: " + relSeason)
 		}
 	}
-
 	// ---- Режим без фильтра расширений ----
 	if len(extensions) == 0 {
 		var totalFolders int

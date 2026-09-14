@@ -168,20 +168,45 @@ func collectSeasonPaths(root string, year int, season string) ([]string, error) 
 func syncDirs(sourceRoot, targetRoot string, year int, season string, overwrite bool, extensions []string,
 	logFunc func(string), progressCallback func(float64)) error {
 
-	targetSeasons, err := collectSeasonPaths(targetRoot, year, season)
+	// Собираем сезоны из ИСХОДНОЙ директории
+	sourceSeasons, err := collectSeasonPaths(sourceRoot, year, season)
 	if err != nil {
 		return err
 	}
-	logFunc("Найдено сезонных папок: " + strconv.Itoa(len(targetSeasons)))
+	logFunc("Найдено сезонных папок в исходной: " + strconv.Itoa(len(sourceSeasons)))
+
+	if len(sourceSeasons) == 0 {
+		logFunc("Сезонные папки не найдены в исходной директории.")
+		progressCallback(1.0)
+		return nil
+	}
+
+	// Создаём отсутствующие сезонные папки в целевой,
+	// но только если родительская папка (год) уже существует.
+	for _, relSeason := range sourceSeasons {
+		targetSeason := filepath.Join(targetRoot, relSeason)
+		parent := filepath.Dir(targetSeason)
+		if _, err := os.Stat(parent); os.IsNotExist(err) {
+			logFunc("Пропускаем (нет папки года в целевой): " + relSeason)
+			continue
+		}
+		if _, err := os.Stat(targetSeason); os.IsNotExist(err) {
+			if err := os.MkdirAll(targetSeason, 0755); err != nil {
+				logFunc("Ошибка создания сезона " + relSeason + ": " + err.Error())
+				continue
+			}
+			logFunc("Создан сезон: " + relSeason)
+		}
+	}
 
 	// ---- Режим без фильтра расширений ----
 	if len(extensions) == 0 {
 		var totalFolders int
-		for _, relSeason := range targetSeasons {
+		for _, relSeason := range sourceSeasons {
 			sourceSeason := filepath.Join(sourceRoot, relSeason)
-			if _, err := os.Stat(sourceSeason); os.IsNotExist(err) {
-				logFunc("Пропускаем (нет в исходной): " + relSeason)
-				continue
+			targetSeason := filepath.Join(targetRoot, relSeason)
+			if _, err := os.Stat(targetSeason); os.IsNotExist(err) {
+				continue // родительской папки нет в целевой — пропускаем
 			}
 			entries, err := os.ReadDir(sourceSeason)
 			if err != nil {
@@ -199,7 +224,7 @@ func syncDirs(sourceRoot, targetRoot string, year int, season string, overwrite 
 					continue
 				}
 				srcFolder := filepath.Join(sourceSeason, folderName)
-				dstFolder := filepath.Join(targetRoot, relSeason, folderName)
+				dstFolder := filepath.Join(targetSeason, folderName)
 
 				if _, err := os.Stat(dstFolder); err == nil {
 					if !overwrite {
@@ -211,15 +236,14 @@ func syncDirs(sourceRoot, targetRoot string, year int, season string, overwrite 
 							logFunc("Добавлено элементов: " + strconv.Itoa(copied))
 						}
 						totalFolders++
-						progressCallback(float64(totalFolders) / float64(len(targetSeasons)))
+						progressCallback(float64(totalFolders) / float64(len(sourceSeasons)))
 						continue
-					} else {
-						if err := os.RemoveAll(dstFolder); err != nil {
-							logFunc("Ошибка удаления " + dstFolder + ": " + err.Error())
-							continue
-						}
-						logFunc("Удалена старая: " + filepath.Join(relSeason, folderName))
 					}
+					if err := os.RemoveAll(dstFolder); err != nil {
+						logFunc("Ошибка удаления " + dstFolder + ": " + err.Error())
+						continue
+					}
+					logFunc("Удалена старая: " + filepath.Join(relSeason, folderName))
 				}
 				logFunc("Копируем папку: " + filepath.Join(relSeason, folderName))
 				if err := copyDir(srcFolder, dstFolder); err != nil {
@@ -228,7 +252,7 @@ func syncDirs(sourceRoot, targetRoot string, year int, season string, overwrite 
 					logFunc("Успешно скопировано.")
 				}
 				totalFolders++
-				progressCallback(float64(totalFolders) / float64(len(targetSeasons)))
+				progressCallback(float64(totalFolders) / float64(len(sourceSeasons)))
 			}
 		}
 		logFunc("Синхронизация завершена. Обработано папок: " + strconv.Itoa(totalFolders))
@@ -241,12 +265,11 @@ func syncDirs(sourceRoot, targetRoot string, year int, season string, overwrite 
 		dst string
 	}
 	var jobs []fileJob
-	var processedFolders int
 
-	for _, relSeason := range targetSeasons {
+	for _, relSeason := range sourceSeasons {
 		sourceSeason := filepath.Join(sourceRoot, relSeason)
-		if _, err := os.Stat(sourceSeason); os.IsNotExist(err) {
-			logFunc("Пропускаем (нет в исходной): " + relSeason)
+		targetSeason := filepath.Join(targetRoot, relSeason)
+		if _, err := os.Stat(targetSeason); os.IsNotExist(err) {
 			continue
 		}
 		entries, err := os.ReadDir(sourceSeason)
@@ -265,11 +288,10 @@ func syncDirs(sourceRoot, targetRoot string, year int, season string, overwrite 
 				continue
 			}
 			srcFolder := filepath.Join(sourceSeason, folderName)
-			dstFolder := filepath.Join(targetRoot, relSeason, folderName)
+			dstFolder := filepath.Join(targetSeason, folderName)
 
 			// Если папка существует и перезапись выключена – дозаполнение
 			if _, err := os.Stat(dstFolder); err == nil && !overwrite {
-				logFunc("Обновляем (дозаполнение) " + filepath.Join(relSeason, folderName))
 				var localJobs []fileJob
 				var fileCount int
 				err = filepath.WalkDir(srcFolder, func(path string, d os.DirEntry, err error) error {
@@ -306,12 +328,9 @@ func syncDirs(sourceRoot, targetRoot string, year int, season string, overwrite 
 					continue
 				}
 				if fileCount > 0 {
-					logFunc("Найдено новых файлов: " + strconv.Itoa(fileCount))
+					logFunc("Найдено новых файлов в " + filepath.Join(relSeason, folderName) + ": " + strconv.Itoa(fileCount))
 					jobs = append(jobs, localJobs...)
-				} else {
-					logFunc("Новых файлов нет.")
 				}
-				processedFolders++
 				continue
 			}
 
@@ -321,7 +340,6 @@ func syncDirs(sourceRoot, targetRoot string, year int, season string, overwrite 
 					logFunc("Ошибка удаления " + dstFolder + ": " + err.Error())
 					continue
 				}
-				logFunc("Удалена старая: " + filepath.Join(relSeason, folderName))
 			}
 			if err := os.MkdirAll(dstFolder, 0755); err != nil {
 				logFunc("Ошибка создания папки: " + err.Error())
@@ -360,10 +378,7 @@ func syncDirs(sourceRoot, targetRoot string, year int, season string, overwrite 
 				continue
 			}
 			if fileCount > 0 {
-				logFunc("Найдено файлов для копирования: " + strconv.Itoa(fileCount))
-				processedFolders++
-			} else {
-				logFunc("Нет файлов с выбранными расширениями.")
+				logFunc("Найдено файлов в " + filepath.Join(relSeason, folderName) + ": " + strconv.Itoa(fileCount))
 			}
 		}
 	}

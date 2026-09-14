@@ -43,7 +43,8 @@ func shouldDownload(name string) bool {
 // ---------- ОБХОД ПАПКИ ----------
 
 // collectFolder рекурсивно обходит дерево и наполняет состояние.
-func collectFolder(ctx context.Context, srv *drive.Service, folderID, relPath string, st *DownloadState) error {
+// Возвращает счётчик добавленных новых файлов.
+func collectFolder(ctx context.Context, srv *drive.Service, folderID, relPath string, st *DownloadState) (int, error) {
 	query := fmt.Sprintf("'%s' in parents and trashed=false", folderID)
 
 	var allFiles []*drive.File
@@ -56,10 +57,21 @@ func collectFolder(ctx context.Context, srv *drive.Service, folderID, relPath st
 		if pageToken != "" {
 			call = call.PageToken(pageToken)
 		}
-		res, err := call.Do()
+
+		var res *drive.FileList
+		// Оборачиваем вызов API в retry
+		err := withRetry(ctx, "list folder "+folderID, func() error {
+			r, e := call.Do()
+			if e != nil {
+				return e
+			}
+			res = r
+			return nil
+		})
 		if err != nil {
-			return fmt.Errorf("list folder %s: %w", folderID, err)
+			return 0, fmt.Errorf("list folder %s: %w", folderID, err)
 		}
+
 		allFiles = append(allFiles, res.Files...)
 		if res.NextPageToken == "" {
 			break
@@ -67,14 +79,17 @@ func collectFolder(ctx context.Context, srv *drive.Service, folderID, relPath st
 		pageToken = res.NextPageToken
 	}
 
+	added := 0
 	for _, file := range allFiles {
 		childRel := filepath.Join(relPath, file.Name)
 
 		if file.MimeType == "application/vnd.google-apps.folder" {
 			log.Printf("📁 Обход: %s", childRel)
-			if err := collectFolder(ctx, srv, file.Id, childRel, st); err != nil {
-				return err
+			n, err := collectFolder(ctx, srv, file.Id, childRel, st)
+			if err != nil {
+				return added, err
 			}
+			added += n
 			continue
 		}
 
@@ -85,15 +100,19 @@ func collectFolder(ctx context.Context, srv *drive.Service, folderID, relPath st
 			continue
 		}
 
-		st.AddFile(FileState{
-			ID:       file.Id,
-			Name:     file.Name,
-			RelPath:  childRel,
-			Size:     file.Size,
-			MimeType: file.MimeType,
-		})
+		// Добавляем только если такого ID ещё нет в состоянии.
+		if !st.HasFile(file.Id) {
+			st.AddFile(FileState{
+				ID:       file.Id,
+				Name:     file.Name,
+				RelPath:  childRel,
+				Size:     file.Size,
+				MimeType: file.MimeType,
+			})
+			added++
+		}
 	}
-	return nil
+	return added, nil
 }
 
 // downloadAll проходит по состоянию и качает то, что ещё не скачано.
@@ -262,28 +281,42 @@ func main() {
 	localBasePath := "./downloads"
 	statePath := ".download_state.json"
 
-	// --- Пытаемся загрузить состояние ---
+	// --- Загружаем состояние (или создаём новое) ---
 	st, err := LoadState(statePath)
 	if err != nil {
 		log.Fatalf("Не удалось загрузить состояние: %v", err)
 	}
 
 	if st == nil || st.RootFolderID != folderID {
-		// Состояния нет или оно от другой папки — обходим дерево заново.
-		log.Printf("🔍 Состояние не найдено, обхожу дерево...")
+		log.Printf("🔍 Состояние не найдено или от другой папки — создаю новое")
 		st = &DownloadState{
 			RootFolderID: folderID,
 			LocalBase:    localBasePath,
 		}
-		if err := collectFolder(ctx, srv, folderID, "", st); err != nil {
-			log.Fatalf("Ошибка при обходе: %v", err)
-		}
-		if err := st.SaveState(statePath); err != nil {
-			log.Fatalf("Не удалось сохранить состояние: %v", err)
-		}
-		log.Printf("💾 Дерево сохранено в %s (%d файлов)", statePath, len(st.Files))
 	} else {
 		log.Printf("♻️  Загружено состояние: %d файлов", len(st.Files))
+	}
+
+	// --- ВСЕГДА обходим дерево, добавляя только новые файлы ---
+	log.Printf("🔍 Сканирую дерево на новые файлы...")
+	added, err := collectFolder(ctx, srv, folderID, "", st)
+	if err != nil {
+		// Сохраняем то, что успели собрать — не теряем прогресс
+		if saveErr := st.SaveState(statePath); saveErr != nil {
+			log.Printf("⚠️  Не удалось сохранить частичное состояние: %v", saveErr)
+		}
+		log.Fatalf("Ошибка при обходе: %v", err)
+	}
+
+	if added > 0 {
+		log.Printf("🆕 Добавлено новых файлов: %d", added)
+	} else {
+		log.Printf("📭 Новых файлов не найдено")
+	}
+	log.Printf("📋 Всего файлов в очереди: %d", len(st.Files))
+
+	if err := st.SaveState(statePath); err != nil {
+		log.Fatalf("Не удалось сохранить состояние: %v", err)
 	}
 
 	// --- Скачиваем всё, что не скачано ---
@@ -292,12 +325,4 @@ func main() {
 	}
 
 	log.Println("🎉 Всё скачано!")
-}
-
-func keys(m map[string]bool) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	return out
 }

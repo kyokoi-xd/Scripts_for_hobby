@@ -27,6 +27,16 @@ var allowedExtensions = map[string]bool{
 	// ".zip": true,   // раскомментируйте при необходимости
 }
 
+// Папки с этими именами (точное совпадение) не обходятся и не скачиваются.
+// Регистр не учитывается.
+var skipFolders = map[string]bool{
+	"s1": true,
+	"s2": true,
+	"s3": true,
+	// "temp": true,
+	// "old":  true,
+}
+
 // Максимальное число попыток для одного файла.
 const maxAttempts = 6
 
@@ -84,6 +94,12 @@ func collectFolder(ctx context.Context, srv *drive.Service, folderID, relPath st
 		childRel := filepath.Join(relPath, file.Name)
 
 		if file.MimeType == "application/vnd.google-apps.folder" {
+			// ⬇️ НОВОЕ: пропускаем ненужные папки
+			if skipFolders[strings.ToLower(file.Name)] {
+				log.Printf("⏭️  Пропуск папки: %s", childRel)
+				continue
+			}
+
 			log.Printf("📁 Обход: %s", childRel)
 			n, err := collectFolder(ctx, srv, file.Id, childRel, st)
 			if err != nil {

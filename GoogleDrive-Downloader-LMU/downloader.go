@@ -23,16 +23,16 @@ import (
 // Если карта непустая — скачиваются ТОЛЬКО файлы с этими расширениями.
 // Пустая карта = скачивать всё.
 var allowedExtensions = map[string]bool{
-	".sto": true,
+	// ".sto": true,
 	// ".zip": true,   // раскомментируйте при необходимости
 }
 
 // Папки с этими именами (точное совпадение) не обходятся и не скачиваются.
 // Регистр не учитывается.
 var skipFolders = map[string]bool{
-	"s1": true,
-	"s2": true,
-	"s3": true,
+	// "s1": true,
+	// "s2": true,
+	// "s3": true,
 	// "temp": true,
 	// "old":  true,
 }
@@ -292,7 +292,7 @@ func main() {
 		log.Fatalf("Drive service: %v", err)
 	}
 
-	folderID := "19KnNjl_ac9lsWqG-SYpgHAsflK3JXM7h"
+	folderID := "1rM0rFrinm_uQ6ZMDj3b-RfYrNTaPSmSV"
 	localBasePath := "./downloads"
 	statePath := ".download_state.json"
 
